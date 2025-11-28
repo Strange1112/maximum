@@ -194,7 +194,7 @@ async def show_conspects_page(message, course: int, subject: str, page: int = 0)
     )
 
 async def process_conspect_data(message, state):
-    """Обрабатывает данные конспекта - текст и изображения"""
+    """Обрабатывает данные конспекта - текст, ссылки и изображения"""
     course = state['course']
     subject = state['subject']
     conspect_id = state['conspect_id']
@@ -211,6 +211,7 @@ async def process_conspect_data(message, state):
         'conspect_id': conspect_id,
         'conspect_name': conspect_name,
         'attachments': state.get('attachments', []),
+        'urls': state.get('urls', []),  # <--- НОВОЕ
         'text_data': state.get('text_data', ''),
         'old_content': current_content,
         'current_content': current_content
@@ -219,12 +220,13 @@ async def process_conspect_data(message, state):
     await message.answer(text="🔄 Начинаю обработку данных конспекта...")
     await process_next_item(message, user_id)
 
+
 async def process_next_item(message, user_id):
     """Обрабатывает следующий элемент данных"""
     state = user_states.get(user_id, {})
 
-    # Сначала обрабатываем текст, если есть
-    if state.get('text_data') and state['text_data'] != state['old_content']:
+    # 1. Сначала обрабатываем текст, если есть
+    if state.get('text_data') and state['text_data'] != state.get('old_content', ''):
         await message.answer(text="🔄 Обрабатываю текстовые данные...")
         try:
             new_content = await asyncio.get_event_loop().run_in_executor(
@@ -243,7 +245,27 @@ async def process_next_item(message, user_id):
             logging.error(f"Ошибка обработки текста: {e}")
             await message.answer(text="❌ Ошибка при обработке текста")
 
-    # Затем обрабатываем изображения
+    # 2. Затем обрабатываем URLs
+    elif state.get('urls'):
+        url = state['urls'].pop(0)
+        await message.answer(text=f"🔄 Обрабатываю ссылку: {url[:50]}...")
+        try:
+            new_content = await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: generate_updated_note(
+                    state['current_content'],
+                    state['conspect_name'],
+                    "url",
+                    url
+                )
+            )
+            state['current_content'] = new_content
+            await message.answer(text=f"✅ Ссылка обработана! Осталось ссылок: {len(state['urls'])}")
+        except Exception as e:
+            logging.error(f"Ошибка обработки URL: {e}")
+            await message.answer(text="❌ Ошибка при обработке ссылки")
+
+    # 3. Затем обрабатываем изображения
     elif state.get('attachments'):
         image_path = state['attachments'].pop(0)
         current_content = state.get('current_content', state['old_content'])
@@ -270,7 +292,7 @@ async def process_next_item(message, user_id):
             await message.answer(text="❌ Ошибка при обработке изображения")
 
     # Проверяем, есть ли еще данные для обработки
-    if state.get('text_data') or state.get('attachments'):
+    if state.get('text_data') or state.get('urls') or state.get('attachments'):
         await asyncio.sleep(1)
         await process_next_item(message, user_id)
     else:
@@ -303,6 +325,7 @@ async def process_next_item(message, user_id):
                 'old_content': state['old_content'],
                 'new_content': final_content
             }
+
 
 @dp.bot_started()
 async def bot_started(event: BotStarted):
@@ -360,8 +383,8 @@ async def handle_message(event: MessageCreated):
 
     # Обработка ввода названия нового конспекта
     elif (user_id in user_states and
-          user_states[user_id].get('waiting_for_conspect_name') and
-          message.body.text):
+        user_states[user_id].get('waiting_for_conspect_name') and
+        message.body.text):
         state = user_states[user_id]
         course = state['course']
         subject = state['subject']
@@ -376,20 +399,32 @@ async def handle_message(event: MessageCreated):
                 'conspect_id': conspect_id,
                 'conspect_name': conspect_name,
                 'attachments': [],
+                'urls': [],  # <--- НОВОЕ
                 'text_data': ''
             }
-            await message.answer(text="📝 Теперь отправьте текст конспекта или изображения. После загрузки напишите 'готово'")
+            await message.answer(text="📝 Теперь отправьте текст конспекта, изображения или ссылки. После загрузки напишите 'готово'")
 
-    # Обработка данных конспекта (текст и изображения)
+
+    # Обработка данных конспекта (текст, ссылки и изображения)
     elif (user_id in user_states and
-          user_states[user_id].get('waiting_for_conspect_data')):
+        user_states[user_id].get('waiting_for_conspect_data')):
         state = user_states[user_id]
 
-        # Обработка текста
+        # Обработка текста или URL
         if message.body.text and message.body.text.strip():
             if message.body.text.lower() not in ['готово', 'done', 'закончил']:
-                state['text_data'] = message.body.text.strip()
-                await message.answer(text="✅ Текст конспекта получен! Можете отправить изображения или написать 'готово'")
+                text = message.body.text.strip()
+                
+                # Проверка на URL
+                if text.startswith('http://') or text.startswith('https://'):
+                    if 'urls' not in state:
+                        state['urls'] = []
+                    state['urls'].append(text)
+                    await message.answer(text=f"✅ Ссылка получена! Можете отправить ещё данные или написать 'готово'")
+                else:
+                    # Обычный текст
+                    state['text_data'] = text
+                    await message.answer(text="✅ Текст конспекта получен! Можете отправить изображения или написать 'готово'")
 
         # Обработка изображений
         if message.body.attachments:
@@ -410,10 +445,11 @@ async def handle_message(event: MessageCreated):
 
         # Обработка команды "готово"
         if message.body.text and message.body.text.lower() in ['готово', 'done', 'закончил']:
-            if state['text_data'] or state['attachments']:
+            if state.get('text_data') or state.get('attachments') or state.get('urls'):
                 await process_conspect_data(message, state)
             else:
-                await message.answer(text="❌ Не получено ни текста, ни изображений.")
+                await message.answer(text="❌ Не получено ни текста, ни изображений, ни ссылок.")
+
 
 async def show_courses_menu(message):
     button_1 = CallbackButton(text="1 курс", payload="first")
@@ -492,7 +528,7 @@ async def handle_callback(event: MessageCallback):
         course = int(parts[3])
         subject_name = "_".join(parts[4:])
         user_states[user_id] = {
-            'waiting_for_conspect_name': True,
+            'f_for_conspect_name': True,
             'course': course,
             'subject': subject_name
         }
